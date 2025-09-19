@@ -26,4 +26,5 @@ class PromptTemplateManager:
             "template": response["prompt"]
             if "prompt" in response
             else response["promptTemplate"]["textTemplate"],
+            "modelArn": response.get("modelArn"),
         }

@@ -9,7 +9,7 @@ from uuid import uuid4
 import chainlit as cl
 
 from agentcore.bedrock_clients import BedrockDependencyContainer
-from agentcore.strands_agent_service import StrandsAgentService
+from agentcore.strands_agent_service import AgentResponse, StrandsAgentService
 
 from .config_loader import EnvironmentLoader
 
@@ -52,20 +52,31 @@ async def on_message(message: cl.Message) -> None:
         return
 
     async with cl.Step(name="Retrieve context from Bedrock Knowledge Base") as retrieve_step:
-        agent_request, citations = service.build_agent_request(message.content)
+        prepared = await cl.make_async(service.prepare)(message.content)
         preview = {
-            "promptPreview": agent_request["prompt"][:160],
-            "references": citations,
+            "promptPreview": prepared.prompt[:160],
+            "references": prepared.citations,
         }
         retrieve_step.output = json.dumps(preview, indent=2)
 
     async with cl.Step(name="Invoke Bedrock AgentCore via Strands") as invoke_step:
-        result = service.invoke_prepared(conversation_id, agent_request, citations)
-        invoke_step.output = json.dumps(result["metrics"], indent=2)
+        result: AgentResponse = await cl.make_async(service.complete)(conversation_id, prepared)
+        metrics_payload = result.metrics.to_dict()
+        if result.guardrail_action:
+            metrics_payload["guardrailAction"] = result.guardrail_action
+        if result.guardrail_reason:
+            metrics_payload["guardrailReason"] = result.guardrail_reason
+        if result.guardrail_metadata:
+            metrics_payload["guardrailMetadata"] = result.guardrail_metadata
+        invoke_step.output = json.dumps(metrics_payload, indent=2)
 
     final_step = cl.Step(name="Final agent response")
     async with final_step:
-        final_text = f"{result['response']}\n\n{_format_citations(result['citations'])}"
+        guardrail_note = ""
+        if result.guardrail_action == "GUARDRAIL_INTERVENED":
+            reason = result.guardrail_reason or "Guardrail prevented unsafe MCP content."
+            guardrail_note = f"\n\n> ⚠️ Guardrail applied: {reason}"
+        final_text = f"{result.text}{guardrail_note}\n\n{_format_citations(result.citations)}"
         await final_step.send(content=final_text, author="Strands Agent")
 
     if service.observability:
